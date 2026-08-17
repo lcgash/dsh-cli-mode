@@ -796,7 +796,9 @@ let ready = false             // input queue only drains after bootstrap complet
 let promptShown = false        // first prompt waits for the stream hello banner
 let justSent = false          // message just sent — prompt returns at turn end
 let queuedCount = 0           // 等待队列(来自 mux session/queue 帧),与网页端一致
-let swallowLineUntil = 0     // 菜单选择后短暂吞掉泄漏的 Enter(如 @ 选择器)             // input queue only drains after bootstrap completes
+let swallowLineUntil = 0     // 菜单选择后短暂吞掉泄漏的 Enter(如 @ 选择器)
+let pasteBuf = []           // 粘贴检测:短窗口内连续到达的行
+let pasteTimer = null             // input queue only drains after bootstrap completes
 
 let promptTimer = null
 let currentModel = null      // { provider, model, reasoningEffort } — bottom status line
@@ -913,8 +915,10 @@ function initUI() {
       prompt()
       return
     }
-    holdQueue.push(line)
-    pump()
+    // 粘贴检测:120ms 内连续到达的行视为一次粘贴,合并后统一发送
+    pasteBuf.push(line)
+    if (pasteTimer !== null) clearTimeout(pasteTimer)
+    pasteTimer = setTimeout(flushPaste, 120)
   })
   rl.on('SIGINT', () => {
     if (menuActive) return
@@ -1218,6 +1222,23 @@ async function handleLine(raw) {
     else writeLine(C.red + '✗ ' + (j && (j.error || j.message)) || 'send failed' + C.reset)
   } catch (e) { writeLine(C.red + '✗ ' + e.message + C.reset) }
   return false
+}
+
+// 粘贴缓冲结束:单行走正常流程;多行(带换行的粘贴)进 pending,回车统一发送
+function flushPaste() {
+  pasteTimer = null
+  if (pasteBuf.length === 0) return
+  const batch = pasteBuf
+  pasteBuf = []
+  if (batch.length > 1 && batch[batch.length - 1] === '') batch.pop() // 去掉末尾空行
+  if (batch.length <= 1) {
+    holdQueue.push(batch[0] !== undefined ? batch[0] : '')
+    pump()
+    return
+  }
+  // 多行粘贴:不发送,先入 pending,显示提示
+  pending += batch.join('\n') + '\n'
+  writeLine(C.dim + '⏸ 已粘贴 ' + batch.length + ' 行,回车发送(或继续输入追加)' + C.reset)
 }
 
 function pump() {
