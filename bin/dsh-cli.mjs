@@ -143,6 +143,9 @@ let sawText = false          // this step saw live text deltas
 let reasoningActive = false  // model is emitting reasoning right now
 let lastReasoning = ''       // accumulated reasoning of the current turn (/think)
 let agentBusy = false        // agent turn in flight — don't flash the prompt
+let thinkShown = false       // ⋯ thinking… indicator currently visible
+let thinkTimer = null
+let reasoningChars = 0
 let toolVerbose = false      // /tools on: 显示每个工具调用;off(默认): 仅错误 + 回合汇总
 let turnToolCount = 0
 const turnToolNames = new Set()
@@ -268,7 +271,13 @@ function renderStepText() {
   stepLines = rendered.split('\r\n').length
 }
 
+function clearThink() {
+  if (thinkTimer !== null) { clearTimeout(thinkTimer); thinkTimer = null }
+  if (thinkShown) { process.stdout.write('\x1b[2K\r'); thinkShown = false }
+}
+
 function finalizeStream() {
+  clearThink()
   if (streaming) {
     if (renderTimer !== null) { clearTimeout(renderTimer); renderTimer = null }
     renderStepText()
@@ -282,6 +291,7 @@ function finalizeStream() {
 
 function pushText(t) {
   if (!streaming) { process.stdout.write('\x1b[2K\r'); streaming = true }
+  thinkShown = false
   sawText = true
   stepText += t
   if (renderTimer === null) renderTimer = setTimeout(renderStepText, 90)
@@ -552,33 +562,46 @@ function renderEvent(ev) {
     }
     case 'status':
       if (ev.status === 'running') { agentBusy = true; writeLine(C.yellow + '● agent working…' + C.reset) }
-      else if (ev.status === 'idle') { agentBusy = false; prompt() }
+      else if (ev.status === 'idle') { agentBusy = false; justSent = false; prompt() }
       break
     case 'text-delta':
       pushText(ev.text)
       break
     case 'reasoning-start':
       reasoningActive = true
-      if (!showReasoning && !streaming) {
-        streaming = true
-        process.stdout.write('\x1b[2K\r' + C.gray + '⋯ thinking…' + C.reset)
+      reasoningChars = 0
+      clearThink()
+      if (!showReasoning) {
+        thinkTimer = setTimeout(() => {
+          thinkTimer = null
+          if (!streaming && reasoningChars > 12 && !menuActive) {
+            thinkShown = true
+            process.stdout.write('\x1b[2K\r' + C.gray + '⋯ thinking…' + C.reset)
+          }
+        }, 250)
       }
       break
     case 'reasoning-delta':
+      reasoningChars += (ev.text || '').length
       lastReasoning += ev.text
       if (showReasoning) {
         if (!streaming) { process.stdout.write('\x1b[2K\r'); streaming = true }
         outBuf += C.gray + C.italic + ev.text + C.reset
         if (outTimer === null) outTimer = setTimeout(() => { outTimer = null; flushOut() }, 16)
+      } else if (thinkTimer !== null && reasoningChars > 12 && !streaming && !thinkShown) {
+        clearTimeout(thinkTimer)
+        thinkTimer = null
+        thinkShown = true
+        process.stdout.write('\x1b[2K\r' + C.gray + '⋯ thinking…' + C.reset)
       }
       break
     case 'reasoning-end':
       if (showReasoning) flushOut()
+      clearThink()
       break
     case 'step-end':
       finalizeStream()
       sawText = false
-      if (!agentBusy) prompt()
       break
     case 'assistant':
       // fallback: provider streamed no chunks, print assembled text now
@@ -616,6 +639,7 @@ function renderEvent(ev) {
       }
       turnToolCount = 0
       turnToolNames.clear()
+      reasoningChars = 0
       lastReasoning = ''
       prompt()
       break
@@ -678,7 +702,8 @@ let pickState = null          // non-TTY picker fallback: { items, resolve }
 const holdQueue = []          // serialized input processing
 let busy = false
 let ready = false             // input queue only drains after bootstrap completes
-let promptShown = false        // first prompt waits for the stream hello banner             // input queue only drains after bootstrap completes
+let promptShown = false        // first prompt waits for the stream hello banner
+let justSent = false          // message just sent — prompt returns at turn end             // input queue only drains after bootstrap completes
 
 let promptTimer = null
 let currentModel = null      // { provider, model, reasoningEffort } — bottom status line
@@ -1028,7 +1053,8 @@ async function handleLine(raw) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, sessionId: sessionId || undefined }),
     })
-    if (!j.accepted) writeLine(C.red + '✗ ' + (j.error || j.message || 'send failed') + C.reset)
+    if (j && j.accepted) justSent = true // 交给回合结束再画 prompt
+    else writeLine(C.red + '✗ ' + (j && (j.error || j.message)) || 'send failed' + C.reset)
   } catch (e) { writeLine(C.red + '✗ ' + e.message + C.reset) }
 }
 
@@ -1038,7 +1064,12 @@ function pump() {
   const raw = holdQueue.shift()
   handleLine(raw)
     .catch((e) => writeLine(C.red + '✗ ' + ((e && e.message) || String(e)) + C.reset))
-    .finally(() => { busy = false; prompt(); pump() })
+    .finally(() => {
+      busy = false
+      if (justSent) justSent = false
+      else prompt()
+      pump()
+    })
 }
 
 async function main() {
