@@ -39,6 +39,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/<your-org>/dsh-plugin.git"
+    "url": "git+https://gitee.com/<your-id>/dsh-cli-mode.git"
   }
 }
