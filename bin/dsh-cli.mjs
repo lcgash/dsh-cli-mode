@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
  * dsh-cli — 在终端里直接和 DeepSeek Harness 的 agent 对话,不用打开 GUI 页面。
+ * 逻辑类似 codex:在哪个目录启动,哪个目录就是工作区(会话 cwd = 终端 pwd)。
  *
  * 前提:harness 里运行着 cli-mode 插件(注册 /dsh-cli/* 路由)。
  *
@@ -68,7 +69,7 @@ const C = {
   red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', cyan: '\x1b[36m', gray: '\x1b[90m',
 }
 
-const COMMANDS = ['/help', '/sessions', '/switch', '/attach', '/open', '/resume', '/close', '/mode', '/model', '/permission', '/think', '/transcript', '/cancel', '/clear', '/exit', '/url']
+const COMMANDS = ['/help', '/sessions', '/switch', '/attach', '/open', '/resume', '/close', '/mode', '/model', '/permission', '/tools', '/think', '/transcript', '/cancel', '/clear', '/exit', '/url']
 
 // ---- approval bridging via the harness mux stream ----
 // the web answerer owns approval/request, so the CLI subscribes to the mux
@@ -142,6 +143,9 @@ let sawText = false          // this step saw live text deltas
 let reasoningActive = false  // model is emitting reasoning right now
 let lastReasoning = ''       // accumulated reasoning of the current turn (/think)
 let agentBusy = false        // agent turn in flight — don't flash the prompt
+let toolVerbose = false      // /tools on: 显示每个工具调用;off(默认): 仅错误 + 回合汇总
+let turnToolCount = 0
+const turnToolNames = new Set()
 let outBuf = ''
 let outTimer = null
 let menuActive = false       // a raw-mode menu owns the screen
@@ -215,25 +219,9 @@ function ask(question, def) {
 // first use: install the cli-mode plugin into the harness via a session agent
 // (the harness only installs plugins through the model's cordis_define/run tools,
 // and those tools only exist in sessions composed from the `cordis` preset)
-// 自举安装的插件源码:包布局 lib/plugin-source.txt,开发布局 dsh-cli-plugin.js
-function loadPluginSource() {
-  const candidates = [
-    path.join(CLI_DIR, '..', 'lib', 'plugin-source.txt'),
-    path.join(CLI_DIR, 'dsh-cli-plugin.js'),
-    path.join(CLI_DIR, '..', 'dsh-cli-plugin.js'),
-  ]
-  for (const p of candidates) {
-    try {
-      const txt = readFileSync(p, 'utf8')
-      if (txt.includes('return {')) return txt
-    } catch (e) { /* try next */ }
-  }
-  return null
-}
-
 async function bootstrap() {
-  let pluginSrc = loadPluginSource()
-  if (!pluginSrc) return { ok: false, reason: 'plugin-file-missing' }
+  let pluginSrc
+  try { pluginSrc = readFileSync(path.join(CLI_DIR, 'dsh-cli-plugin.js'), 'utf8') } catch (e) { return { ok: false, reason: 'plugin-file-missing' } }
   let sid
   try {
     const items = (await rpc('session.list', {})).items || []
@@ -479,9 +467,13 @@ function renderEvent(ev) {
       }
       break
     case 'tool-start': {
-      const raw = String(ev.args || '')
-      const preview = raw.replace(/\s+/g, ' ').slice(0, 120)
-      writeLine(C.cyan + '⚙ ' + ev.name + C.dim + (preview ? ' ' + preview + (raw.length > 120 ? '…' : '') : '') + C.reset)
+      turnToolCount++
+      if (ev.name) turnToolNames.add(ev.name)
+      if (toolVerbose) {
+        const raw = String(ev.args || '')
+        const preview = raw.replace(/\s+/g, ' ').slice(0, 120)
+        writeLine(C.cyan + '⚙ ' + ev.name + C.dim + (preview ? ' ' + preview + (raw.length > 120 ? '…' : '') : '') + C.reset)
+      }
       break
     }
     case 'tool-end':
@@ -492,6 +484,12 @@ function renderEvent(ev) {
       finalizeStream()
       if (ev.reason === 'aborted') writeLine(C.yellow + '⏹ turn cancelled' + C.reset)
       else if (ev.reason !== 'completed') writeLine(C.yellow + '⏹ turn ended: ' + ev.reason + C.reset)
+      if (turnToolCount > 0 && !toolVerbose) {
+        const names = [...turnToolNames].join(', ')
+        writeLine(C.dim + '⚙ ' + turnToolCount + ' 个工具调用' + (names ? ' (' + names + ')' : '') + C.reset)
+      }
+      turnToolCount = 0
+      turnToolNames.clear()
       lastReasoning = ''
       prompt()
       break
@@ -844,6 +842,12 @@ async function command(line) {
           writeLine(C.green + '✓ model → ' + provider + '/' + ((r.selected && r.selected.model) || model) + C.reset)
         }
       } catch (e) { writeLine(C.red + '✗ ' + e.message + C.reset) }
+      break
+    case '/tools':
+      if (rest[0] === 'on') toolVerbose = true
+      else if (rest[0] === 'off') toolVerbose = false
+      else toolVerbose = !toolVerbose
+      writeLine(toolVerbose ? C.green + '✓ 工具调用详情: 显示(每步 ⚙ 行)' + C.reset : C.dim + '工具调用详情: 折叠(仅错误与回合汇总),/tools on 打开' + C.reset)
       break
     case '/think':
       if (lastReasoning) {
