@@ -168,16 +168,123 @@ function flushOut() {
   if (outBuf && !menuActive) { process.stdout.write(outBuf); outBuf = '' }
 }
 
+function visibleLen(s) {
+  return String(s).replace(/\x1b\[[0-9;]*m/g, '').length
+}
+
+function renderInline(s) {
+  s = String(s)
+  s = s.replace(/`([^`]+)`/g, (_m, c) => C.yellow + c + C.reset)
+  s = s.replace(/\*\*([^*]+)\*\*/g, (_m, t) => C.bold + t + C.reset)
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, (_m, p, t) => p + C.italic + t + C.reset)
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, t, u) => t + C.dim + ' (' + u + ')' + C.reset)
+  return s
+}
+
+function renderCodeBlock(code, lang) {
+  const fence = '```' + (lang || '')
+  return [C.dim + fence + C.reset, ...code.split('\n').map((l) => '    ' + l), C.dim + '```' + C.reset].join('\r\n')
+}
+
+function renderTable(lines) {
+  const rows = lines.map((l) => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim()))
+  let headerIdx = -1
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].length > 0 && rows[i].every((c) => /^:?-{1,}:?$/.test(c))) { headerIdx = i; break }
+  }
+  const body = headerIdx >= 0 ? rows.filter((_r, i) => i !== headerIdx) : rows
+  if (body.length === 0) return lines.map((l) => renderInline(l)).join('\r\n')
+  const cols = Math.max(...body.map((r) => r.length))
+  const widths = []
+  for (let c = 0; c < cols; c++) {
+    widths.push(Math.max(3, ...body.map((r) => (r[c] !== undefined ? visibleLen(renderInline(r[c])) : 0))))
+  }
+  const fmt = (cells) => {
+    const padded = []
+    for (let c = 0; c < cols; c++) {
+      const cell = renderInline(cells[c] !== undefined ? cells[c] : '')
+      padded.push(cell + ' '.repeat(Math.max(0, widths[c] - visibleLen(cell))))
+    }
+    return '  ' + padded.join(C.dim + ' │ ' + C.reset)
+  }
+  const out = []
+  if (headerIdx >= 0) out.push(fmt(body[0]))
+  out.push('  ' + widths.map((w) => '─'.repeat(w)).join('─┼─'))
+  for (let i = headerIdx >= 0 ? 1 : 0; i < body.length; i++) out.push(fmt(body[i]))
+  return out.join('\r\n')
+}
+
+function renderMarkdown(text) {
+  const lines = String(text).split('\n')
+  const out = []
+  let inCode = false
+  let codeLang = ''
+  let codeBuf = []
+  let tableBuf = []
+  const flushTable = () => {
+    if (tableBuf.length > 0) { out.push(renderTable(tableBuf)); tableBuf = [] }
+  }
+  const flushCode = () => {
+    if (codeBuf.length > 0) { out.push(renderCodeBlock(codeBuf.join('\n'), codeLang)); codeBuf = [] }
+  }
+  for (const raw of lines) {
+    const line = raw.trimEnd()
+    const fence = /^```+/.exec(line)
+    if (fence) {
+      flushTable()
+      if (!inCode) { inCode = true; codeLang = line.slice(fence[0].length).trim() }
+      else flushCode()
+      inCode = !inCode
+      continue
+    }
+    if (inCode) { codeBuf.push(raw); continue }
+    if (/^\s*\|/.test(line)) { tableBuf.push(line); continue }
+    flushTable()
+    const h = /^(#{1,6})\s+(.*)$/.exec(line)
+    if (h) { out.push((h[1].length <= 2 ? C.bold + C.cyan : C.bold) + renderInline(h[2]) + C.reset); continue }
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { out.push(C.dim + '─'.repeat(Math.min(48, process.stdout.columns || 80)) + C.reset); continue }
+    if (/^\s*>\s?/.test(line)) { out.push(C.dim + '│ ' + C.reset + renderInline(line.replace(/^\s*>\s?/, ''))); continue }
+    const li = /^\s*([-*+]|\d+\.)\s+(.*)$/.exec(line)
+    if (li) { out.push('  ' + (li[1].match(/\d/) ? C.dim + li[1] + C.reset : C.dim + '•' + C.reset) + ' ' + renderInline(li[2])); continue }
+    out.push(renderInline(line))
+  }
+  flushTable()
+  flushCode()
+  return out.join('\r\n')
+}
+
+// ---- 流式:文本先攒起来,~90ms 原地重渲染成 markdown(保持流式 + 渲染) ----
+let stepText = ''
+let stepLines = 0
+let renderTimer = null
+
+function renderStepText() {
+  renderTimer = null
+  if (!streaming || stepText === '') return
+  if (stepLines > 0) process.stdout.write('\x1b[' + stepLines + 'A')
+  process.stdout.write('\x1b[J')
+  const rendered = renderMarkdown(stepText)
+  process.stdout.write(rendered)
+  stepLines = rendered.split('\r\n').length
+}
+
 function finalizeStream() {
-  if (streaming) { flushOut(); process.stdout.write('\r\n'); streaming = false }
+  if (streaming) {
+    if (renderTimer !== null) { clearTimeout(renderTimer); renderTimer = null }
+    renderStepText()
+    process.stdout.write('\r\n')
+    streaming = false
+  }
   reasoningActive = false
+  stepText = ''
+  stepLines = 0
 }
 
 function pushText(t) {
   if (!streaming) { process.stdout.write('\x1b[2K\r'); streaming = true }
   sawText = true
-  outBuf += crlf(t)
-  if (outTimer === null) outTimer = setTimeout(() => { outTimer = null; flushOut() }, 16)
+  stepText += t
+  if (renderTimer === null) renderTimer = setTimeout(renderStepText, 90)
 }
 
 // 清掉当前行再输出(适合整行消息)
@@ -219,9 +326,25 @@ function ask(question, def) {
 // first use: install the cli-mode plugin into the harness via a session agent
 // (the harness only installs plugins through the model's cordis_define/run tools,
 // and those tools only exist in sessions composed from the `cordis` preset)
+// 自举安装的插件源码:包布局 lib/plugin-source.txt,开发布局 dsh-cli-plugin.js
+function loadPluginSource() {
+  const candidates = [
+    path.join(CLI_DIR, '..', 'lib', 'plugin-source.txt'),
+    path.join(CLI_DIR, 'dsh-cli-plugin.js'),
+    path.join(CLI_DIR, '..', 'dsh-cli-plugin.js'),
+  ]
+  for (const p of candidates) {
+    try {
+      const txt = readFileSync(p, 'utf8')
+      if (txt.includes('return {')) return txt
+    } catch (e) { /* try next */ }
+  }
+  return null
+}
+
 async function bootstrap() {
-  let pluginSrc
-  try { pluginSrc = readFileSync(path.join(CLI_DIR, 'dsh-cli-plugin.js'), 'utf8') } catch (e) { return { ok: false, reason: 'plugin-file-missing' } }
+  let pluginSrc = loadPluginSource()
+  if (!pluginSrc) return { ok: false, reason: 'plugin-file-missing' }
   let sid
   try {
     const items = (await rpc('session.list', {})).items || []
@@ -487,6 +610,9 @@ function renderEvent(ev) {
       if (turnToolCount > 0 && !toolVerbose) {
         const names = [...turnToolNames].join(', ')
         writeLine(C.dim + '⚙ ' + turnToolCount + ' 个工具调用' + (names ? ' (' + names + ')' : '') + C.reset)
+      }
+      if (ev.reason === 'completed') {
+        writeLine(C.green + '✓ 完成' + C.reset + C.dim + ' ─────────────────────' + C.reset)
       }
       turnToolCount = 0
       turnToolNames.clear()
