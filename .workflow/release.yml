@@ -33,3 +33,6 @@ triggers:
 notify: []
 strategy:
   blocking: true
+variables:
+  global:
+  - NPM_TOKEN
