@@ -27,7 +27,7 @@
  * 行尾加反斜杠 \ 可续行(多行输入)。
  */
 import { createInterface } from 'node:readline'
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -318,6 +318,66 @@ function writeLine(text) {
   if (menuActive) return
   finalizeStream()
   process.stdout.write('\x1b[2K\r' + crlf(text) + '\r\n')
+}
+
+// ---- @文件/@目录 引用展开:相对路径基于 CLI 启动目录(即工作区) ----
+const MAX_INLINE_KB = 64
+
+function fmtSize(b) {
+  if (b < 1024) return b + 'B'
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + 'KB'
+  return (b / 1024 / 1024).toFixed(1) + 'MB'
+}
+
+function inlineRef(p) {
+  let raw = p
+  if (raw.startsWith('~')) raw = path.join(homedir(), raw.slice(1))
+  const abs = path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw)
+  let st
+  try { st = statSync(abs) } catch (e) { return null }
+  const header = '@' + p
+  if (st.isDirectory()) {
+    let entries
+    try { entries = readdirSync(abs) } catch (e) { return null }
+    const lines = entries.slice(0, 60).map((n) => {
+      let isDir = false
+      try { isDir = statSync(path.join(abs, n)).isDirectory() } catch (e) { /* ignore */ }
+      return (isDir ? n + '/' : n)
+    })
+    if (entries.length > 60) lines.push('… 共 ' + entries.length + ' 项')
+    return {
+      label: header,
+      summary: '目录, ' + entries.length + ' 项',
+      block: '\n\n===== 引用目录 ' + header + ' =====\n' + lines.map((l) => '- ' + l).join('\n') + '\n',
+    }
+  }
+  const bytes = st.size
+  if (bytes > MAX_INLINE_KB * 1024) {
+    return { label: header, summary: fmtSize(bytes) + ', 超过 ' + MAX_INLINE_KB + 'KB 未内联', block: '' }
+  }
+  let content
+  try { content = readFileSync(abs, 'utf8') } catch (e) { return null }
+  if (content.includes('\u0000')) {
+    return { label: header, summary: '二进制文件, 未内联', block: '' }
+  }
+  return {
+    label: header,
+    summary: '文件, ' + fmtSize(bytes),
+    block: '\n\n===== 引用文件 ' + header + ' =====\n' + content + '\n',
+  }
+}
+
+function expandRefs(text) {
+  const refs = []
+  let blocks = ''
+  const kept = text.replace(/@([^\s@]+)/g, (match, p) => {
+    const info = inlineRef(p)
+    if (!info) return match
+    refs.push(info)
+    if (info.block) blocks += info.block
+    return match // 原文保留 @path,内容追加在消息末尾
+  })
+  return { text: refs.length > 0 ? kept + blocks : kept, refs }
 }
 
 async function api(path, opts) {
@@ -1072,12 +1132,16 @@ async function handleLine(raw) {
   }
   const first = text.trim().split(/\s+/)[0]
   if (first.startsWith('/')) { await command(text.trim()); return true }
+  const expanded = expandRefs(text)
   if (agentBusy) writeLine(C.yellow + '⏳ 已加入等待队列: ' + text + C.reset)
   else writeLine(C.green + '❯ ' + text + C.reset)
+  for (const r of expanded.refs) {
+    writeLine(C.dim + '  ⤷ ' + C.reset + r.label + C.dim + ' (' + r.summary + ')' + C.reset)
+  }
   try {
     const j = await api('/dsh-cli/send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, sessionId: sessionId || undefined }),
+      body: JSON.stringify({ text: expanded.text, sessionId: sessionId || undefined }),
     })
     if (j && j.accepted) justSent = true // 交给回合结束再画 prompt
     else writeLine(C.red + '✗ ' + (j && (j.error || j.message)) || 'send failed' + C.reset)
