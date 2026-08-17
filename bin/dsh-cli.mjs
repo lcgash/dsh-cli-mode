@@ -553,6 +553,7 @@ function showMenu(opts) {
       if (escTimer !== null) clearTimeout(escTimer)
       process.stdin.removeListener('data', onData)
       try { process.stdout.write('\x1b[?25h\x1b[?1049l\x1b8') } catch (e) { /* ignore */ }
+      if (opts.swallowLineAfter) swallowLineUntil = Date.now() + 250 // 先于 rl.resume,吃掉选择时的泄漏回车
       rl.resume()
       try { process.stdin.setRawMode(true) } catch (e) { /* ignore */ } // readline expects raw mode
       menuActive = false
@@ -794,7 +795,8 @@ let busy = false
 let ready = false             // input queue only drains after bootstrap completes
 let promptShown = false        // first prompt waits for the stream hello banner
 let justSent = false          // message just sent — prompt returns at turn end
-let queuedCount = 0           // 等待队列(来自 mux session/queue 帧),与网页端一致             // input queue only drains after bootstrap completes
+let queuedCount = 0           // 等待队列(来自 mux session/queue 帧),与网页端一致
+let swallowLineUntil = 0     // 菜单选择后短暂吞掉泄漏的 Enter(如 @ 选择器)             // input queue only drains after bootstrap completes
 
 let promptTimer = null
 let currentModel = null      // { provider, model, reasoningEffort } — bottom status line
@@ -859,11 +861,14 @@ async function openFilePicker() {
   const sel = await showMenu({
     title: 'files — @引用 (↑↓ select, type to filter)',
     filter: true,
+    swallowLineAfter: true,
     items: files,
   })
   if (sel) {
-    rl.line += '@' + sel
-    prompt()
+    // 延迟注入:等菜单关闭的残余状态稳定;rl.write 自行刷新显示,不再额外 prompt 覆盖
+    setTimeout(() => {
+      try { rl.write('@' + sel) } catch (e) { rl.line += '@' + sel }
+    }, 80)
   } else {
     prompt() // Esc 取消:保留已输入的 @
   }
@@ -902,6 +907,12 @@ function initUI() {
   })
   rl.on('line', (line) => {
     if (pickState !== null) { routeToPicker(line); return }
+    // 菜单打开期间 readline 仍处理数据:其 'line' 是菜单输入泄漏,丢弃
+    if (menuActive || Date.now() < swallowLineUntil) {
+      swallowLineUntil = 0
+      prompt()
+      return
+    }
     holdQueue.push(line)
     pump()
   })
