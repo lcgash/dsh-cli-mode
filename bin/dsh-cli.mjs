@@ -263,17 +263,28 @@ function renderMarkdown(text) {
 
 // ---- 流式:文本先攒起来,~90ms 原地重渲染成 markdown(保持流式 + 渲染) ----
 let stepText = ''
+let stepRendered = 0          // stepText 中已写到终端的部分
+let stepAppend = false        // 用户输入过:本步改为追加模式,不再原地重画
 let stepLines = 0
 let renderTimer = null
 
 function renderStepText() {
   renderTimer = null
   if (!streaming || stepText === '') return
+  if (stepAppend) {
+    // 用户已输入:追加剩余原文,不再移动光标
+    if (stepRendered < stepText.length) {
+      process.stdout.write(crlf(stepText.slice(stepRendered)))
+      stepRendered = stepText.length
+    }
+    return
+  }
   if (stepLines > 0) process.stdout.write('\x1b[' + stepLines + 'A')
   process.stdout.write('\x1b[J')
   const rendered = renderMarkdown(stepText)
   process.stdout.write(rendered)
   stepLines = rendered.split('\r\n').length
+  stepRendered = stepText.length
 }
 
 function clearThink() {
@@ -295,7 +306,7 @@ function finalizeStream() {
 }
 
 function pushText(t) {
-  if (!streaming) { process.stdout.write('\x1b[2K\r'); streaming = true }
+  if (!streaming) { process.stdout.write('\x1b[2K\r'); streaming = true; stepAppend = false; stepRendered = 0 }
   thinkShown = false
   sawText = true
   stepText += t
@@ -757,7 +768,11 @@ function initUI() {
   rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true })
   rl.input.on('keypress', (str, key) => {
     if (!process.stdin.isTTY) return            // piped input: readline still emits keypress per char
-    if (menuActive || asking || streaming) return
+    if (streaming) {
+      if (!stepAppend) { process.stdout.write('\r\n'); stepAppend = true } // 首次按键:换到干净行再追加
+      return
+    }
+    if (menuActive || asking) return
     if (!str || key.ctrl || key.meta) return
     if (key.name === 'return') return
     if (rl.line.startsWith('/')) {
