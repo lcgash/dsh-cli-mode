@@ -108,6 +108,11 @@ async function startMux() {
 function handleMuxFrame(frame) {
   const payload = frame && frame.payload
   if (!payload) return
+  if (payload.type === 'session/queue') {
+    if (sessionId && payload.sessionId && payload.sessionId !== sessionId) return
+    queuedCount = Array.isArray(payload.items) ? payload.items.length : 0
+    return
+  }
   if (payload.type === 'approval/requested') {
     if (sessionId && payload.sessionId && payload.sessionId !== sessionId) return
     pendingApproval = { rpcId: frame.rpcId, approvalId: payload.approvalId, sessionId: payload.sessionId }
@@ -703,7 +708,8 @@ const holdQueue = []          // serialized input processing
 let busy = false
 let ready = false             // input queue only drains after bootstrap completes
 let promptShown = false        // first prompt waits for the stream hello banner
-let justSent = false          // message just sent — prompt returns at turn end             // input queue only drains after bootstrap completes
+let justSent = false          // message just sent — prompt returns at turn end
+let queuedCount = 0           // 等待队列(来自 mux session/queue 帧),与网页端一致             // input queue only drains after bootstrap completes
 
 let promptTimer = null
 let currentModel = null      // { provider, model, reasoningEffort } — bottom status line
@@ -722,11 +728,13 @@ function prompt() {
   promptTimer = setTimeout(() => {
     promptTimer = null
     if (rl === null || rl.closed) return
-    // codex-like bottom status line: current model + reasoning effort, dim
+    // codex-like bottom status line: current model + reasoning effort + queue, dim
     if (currentModel && currentModel.model) {
       let st = 'dsh · ' + currentModel.model
       if (currentModel.reasoningEffort) st += ' · ' + currentModel.reasoningEffort
-      process.stdout.write('\x1b[2K\r' + C.dim + st + C.reset + '\r\n')
+      let tail = ''
+      if (queuedCount > 0) tail = C.yellow + ' ⏳' + queuedCount + ' 条等待' + C.reset + C.dim
+      process.stdout.write('\x1b[2K\r' + C.dim + st + tail + C.reset + '\r\n')
     }
     rl.setPrompt(PROMPT)
     rl.prompt()
@@ -777,6 +785,7 @@ async function doOpen(cwd) {
     })
     if (j.sessionId) {
       sessionId = j.sessionId
+      queuedCount = 0
       reconnectStream()
       writeLine(C.green + '◇ opened session ' + shortId(j.sessionId) + C.reset +
         (j.cwd ? C.dim + '  [workspace ' + j.cwd + ']' + C.reset : ''))
@@ -825,6 +834,7 @@ async function doAttach(id) {
     })
     if (j.attached) {
       sessionId = j.attached
+      queuedCount = 0
       reconnectStream()
       writeLine(C.green + '⇄ attached session ' + shortId(sessionId) + C.reset +
         (j.cwd ? C.dim + '  [workspace ' + j.cwd + ']' + C.reset : ''))
@@ -1047,7 +1057,8 @@ async function handleLine(raw) {
   }
   const first = text.trim().split(/\s+/)[0]
   if (first.startsWith('/')) { await command(text.trim()); return true }
-  writeLine(C.green + '❯ ' + text + C.reset)
+  if (agentBusy) writeLine(C.yellow + '⏳ 已加入等待队列: ' + text + C.reset)
+  else writeLine(C.green + '❯ ' + text + C.reset)
   try {
     const j = await api('/dsh-cli/send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
