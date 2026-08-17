@@ -1034,19 +1034,19 @@ async function command(line) {
 
 // ---- serialized input processing: no line is lost while a command awaits ----
 async function handleLine(raw) {
-  if (raw.endsWith('\\')) { pending += raw.slice(0, -1) + '\n'; return }
+  if (raw.endsWith('\\')) { pending += raw.slice(0, -1) + '\n'; return true }
   const text = pending + raw
   pending = ''
-  if (!text.trim()) return
+  if (!text.trim()) return false // 空回车:无操作,不重画提示符
   if (pendingApproval !== null) {
     const ans = text.trim().toLowerCase()
     if (ans === 'y' || ans === 'yes' || ans === '允许' || ans === '是' || ans === '1') await answerApproval(true)
     else if (ans === 'n' || ans === 'no' || ans === '拒绝' || ans === '否' || ans === '0') await answerApproval(false)
     else writeLine(C.yellow + '(请输入 y 允许或 n 拒绝)' + C.reset)
-    return
+    return false // 审批答复后由回合结束恢复提示符
   }
   const first = text.trim().split(/\s+/)[0]
-  if (first.startsWith('/')) { await command(text.trim()); return }
+  if (first.startsWith('/')) { await command(text.trim()); return true }
   writeLine(C.green + '❯ ' + text + C.reset)
   try {
     const j = await api('/dsh-cli/send', {
@@ -1056,6 +1056,7 @@ async function handleLine(raw) {
     if (j && j.accepted) justSent = true // 交给回合结束再画 prompt
     else writeLine(C.red + '✗ ' + (j && (j.error || j.message)) || 'send failed' + C.reset)
   } catch (e) { writeLine(C.red + '✗ ' + e.message + C.reset) }
+  return false
 }
 
 function pump() {
@@ -1063,11 +1064,16 @@ function pump() {
   busy = true
   const raw = holdQueue.shift()
   handleLine(raw)
-    .catch((e) => writeLine(C.red + '✗ ' + ((e && e.message) || String(e)) + C.reset))
-    .finally(() => {
+    .then((needsPrompt) => {
       busy = false
       if (justSent) justSent = false
-      else prompt()
+      else if (needsPrompt !== false) prompt()
+      pump()
+    })
+    .catch((e) => {
+      busy = false
+      writeLine(C.red + '✗ ' + ((e && e.message) || String(e)) + C.reset)
+      prompt()
       pump()
     })
 }
