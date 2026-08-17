@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /**
  * dsh-cli — 在终端里直接和 DeepSeek Harness 的 agent 对话,不用打开 GUI 页面。
- * 逻辑类似 codex:在哪个目录启动,哪个目录就是工作区(会话 cwd = 终端 pwd)。
  *
  * 前提:harness 里运行着 cli-mode 插件(注册 /dsh-cli/* 路由)。
  *
