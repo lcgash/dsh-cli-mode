@@ -507,7 +507,21 @@ function showMenu(opts) {
     let done = false
 
     const items = opts.items || []
-    const filtered = () => items.filter((it) => !query || String(it.label).toLowerCase().includes(query.toLowerCase()))
+    const fuzzy = (q, label) => {
+      const l = label.toLowerCase()
+      if (l.includes(q)) return true
+      if (q.length > 1) {
+        let i = 0
+        for (const ch of q) {
+          const idx = l.indexOf(ch, i)
+          if (idx === -1) return false
+          i = idx + 1
+        }
+        return true
+      }
+      return false
+    }
+    const filtered = () => items.filter((it) => !query || fuzzy(query.toLowerCase(), String(it.label)))
 
     // alternate screen: the menu is modal and full-screen, so navigating
     // never scrolls the main conversation and closing restores it exactly
@@ -813,6 +827,48 @@ function prompt() {
 }
 
 // typing `/` opens the claude-style command menu
+// 遍历工作区文件树(跳过 node_modules/.git/隐藏文件,限量),供 @ 选择器使用
+function walkFiles(root, limit) {
+  const out = []
+  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.DS_Store'])
+  const walk = (dir, depth) => {
+    if (out.length >= limit || depth > 6) return
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch (e) { return }
+    for (const en of entries) {
+      if (out.length >= limit) return
+      if (skip.has(en.name) || en.name.startsWith('.')) continue
+      const abs = path.join(dir, en.name)
+      const rel = path.relative(process.cwd(), abs).split(path.sep).join('/')
+      if (en.isDirectory()) {
+        out.push({ id: rel, label: rel + '/', detail: '目录' })
+        walk(abs, depth + 1)
+      } else {
+        out.push({ id: rel, label: rel, detail: '文件' })
+      }
+    }
+  }
+  walk(root, 0)
+  return out
+}
+
+// 输入 @ 时弹出文件/目录选择器(codex 式:前缀/模糊搜索,选中插入 @路径)
+async function openFilePicker() {
+  const files = walkFiles(process.cwd(), 800)
+  if (files.length === 0) { writeLine(C.yellow + '(当前目录无可见文件)' + C.reset); return }
+  const sel = await showMenu({
+    title: 'files — @引用 (↑↓ select, type to filter)',
+    filter: true,
+    items: files,
+  })
+  if (sel) {
+    rl.line += '@' + sel
+    prompt()
+  } else {
+    prompt() // Esc 取消:保留已输入的 @
+  }
+}
+
 async function openCommandMenu() {
   const cmd = await showMenu({
     title: 'commands',
@@ -835,6 +891,10 @@ function initUI() {
     if (menuActive || asking) return
     if (!str || key.ctrl || key.meta) return
     if (key.name === 'return') return
+    if (str === '@' && (rl.line === '@' || /(^|\s)@$/.test(rl.line))) {
+      openFilePicker() // @ 开头的 token:文件选择器
+      return
+    }
     if (rl.line.startsWith('/')) {
       rl.line = ''
       openCommandMenu()
