@@ -60,6 +60,8 @@ dsh-cli --attach <id>          # attach to a live session
 
 Type `/` to open the command menu; end a line with `\` for multi-line input.
 
+**Reference files/dirs**: write `@path` in a message (e.g. `@src/main.go`, `@docs/`) and its content is inlined for the agent; relative paths resolve against the CLI launch directory (the workspace); files over 64KB or binary are not inlined.
+
 ### Approval interaction
 
 ```
