@@ -1,6 +1,6 @@
 {
   "name": "dsh-cli-mode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "把 DeepSeek Harness 会话变成终端可交互的 CLI:终端直接与 agent 对话、切换会话/模型/模式/权限模式、审批桥接、codex 式工作区。",
   "type": "module",
   "main": "lib/index.js",
